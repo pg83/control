@@ -1,4 +1,8 @@
 import dbus
+from dbus.mainloop.glib import DBusGMainLoop
+import gobject
+
+DBusGMainLoop(set_as_default = True)
 
 bus = dbus.SystemBus()
 
@@ -12,6 +16,7 @@ class Object(object):
         self.path = path
         self.map = {}
         self.props = {}
+        self.signals = {}
 
         def before(sep, line):
             return line[:line.find(sep)]
@@ -31,6 +36,8 @@ class Object(object):
                 self.map[name(line)] = cur
             elif '<property' in line:
                 self.props[name(line)] = cur
+            elif '<signal' in line:
+                self.signals[name(line)] = cur
 
 
     def interface(self, face):
@@ -51,6 +58,15 @@ class Object(object):
 
         if name in self.props:
             return self.Get(self.props[name], name)
+
+        if name in self.signals:
+            def sigset(handler):
+                def wrapper(*args, **kwargs):
+                    handler(self, *args, **kwargs)
+
+                self.interface(self.signals[name]).connect_to_signal(name, wrapper)
+
+            return sigset
 
 
     def __repr__(self):
@@ -81,14 +97,66 @@ class Settings(Object):
                     return conn
 
 
-srv = NetworkManager()
+    def vpn(self):
+        return self.find('yandex network')
 
-cpath = Settings().find('yandex network').getpath()
-dpath = None
 
-for dev in srv.devices():
+NM = NetworkManager()
+BC = None
+
+def bestchannel():
+    cur = None
+    ret = None
+
+    for dev in NM.devices():
+        if dev.State == 100:
+            if dev.DeviceType == 2:
+                if 'PDAS' in dev.GetAccessPoints():
+                    return None
+
+            if not cur or cur > dev.DeviceType:
+                cur = dev.DeviceType
+                ret = dev
+
+    return ret
+
+def onstate(obj, *args, **kwargs):
+    global BC
+
+    dpath = bestchannel()
+    cpath = Settings().vpn()
+
+    if not cpath:
+        print 'no vpn'
+
+        return
+
+    cpath = cpath.getpath()
+
+    if dpath:
+        dpath = dpath.getpath()
+
+        if dpath != BC:
+            print 'activate', cpath, dpath
+            NM.ActivateConnection(cpath, dpath, '/')
+            BC = dpath
+    else:
+        print 'deactivate', cpath
+
+        try:
+            NM.DeactivateConnection(cpath)
+        except Exception as e:
+            print e
+
+onstate(None)
+
+NM.StateChanged(onstate)
+
+for dev in NM.devices():
+    dev.StateChanged(onstate)
+
     if dev.DeviceType == 2:
-        dpath = dev.getpath()
+        dev.AccessPointAdded(onstate)
+        dev.AccessPointRemoved(onstate)
 
-
-srv.ActivateConnection(cpath, dpath, '/')
+gobject.MainLoop().run()
